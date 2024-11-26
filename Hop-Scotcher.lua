@@ -7,10 +7,11 @@
     Users can save, load, and delete hop maps (profiles) for faster setups.
 
     PLEASE NOTE: THIS FILE IS JUST A CONSOLIDATION OF ALL THE OTHER FILES INSIDE THE SRC DIRECTORY. i HAVE DONE THIS AS I WAS UNABLE TO GET VLC TO RECOGNIZE HOP SCOTCHER WHILE IN A SUBDIRECTORY. THIS IS A QUICK FIX AND IN THE FUTURE I MAY RETURN TO THE MODULAR SETUP AS I FEEL IT IS WAY MORE MANAGEABLE AND ELEGANT. ENJOY!
-    
+
 ]] --[[ ========= IMPORTS AND GLOBAL VARIABLES ========= ]] local vlc = vlc
 local profiles = {} -- Table to store Hop Maps (profiles)
 local config_file = vlc.config.configdir() .. "/hop-scotcher.conf" -- Configuration file path
+local playlist_items = {} -- List of playlist items with per-file settings
 local dialog_instance = nil -- Dialog instance
 
 --[[ ========= UTILITY FUNCTIONS ========= ]]
@@ -57,7 +58,51 @@ local function write_profiles()
     file:close()
 end
 
+-- Export the playlist to an .xspf file
+local function export_playlist(file_path)
+    local file = io.open(file_path, "w")
+    if not file then
+        vlc.msg.err("Failed to open file for writing: " .. file_path)
+        return
+    end
+
+    -- Write XSPF format header
+    file:write('<?xml version="1.0" encoding="UTF-8"?>\n')
+    file:write('<playlist version="1" xmlns="http://xspf.org/ns/0/">\n')
+    file:write('<trackList>\n')
+
+    -- Write each track
+    for _, item in ipairs(playlist_items) do
+        file:write('<track>\n')
+        file:write('<location>', item.path, '</location>\n')
+        file:write('<title>', item.name, '</title>\n')
+        file:write(
+            '<extension application="http://www.videolan.org/vlc/playlist/0">\n')
+        file:write('<vlc:option>start-time=', item.hop_in_time,
+                   '</vlc:option>\n')
+        file:write('<vlc:option>stop-time=', item.hop_out_time,
+                   '</vlc:option>\n')
+        file:write('</extension>\n')
+        file:write('</track>\n')
+    end
+
+    -- Close the playlist
+    file:write('</tracklist>\n')
+    file:write('</playlist>\n')
+    file:close()
+    vlc.msg.info("Playlist exported to: " .. file_path)
+end
+
 --[[ ========= DIALOG FUNCTIONS ========= ]]
+local function update_playlist_list(dialog)
+    local playlist_list = dialog:get_widget("playlist_list")
+    playlist_list:clear()
+
+    for _, item in ipairs(playlist_items) do
+        playlist_list:add_value(item.name, item)
+    end
+end
+
 local function populate_time_dropdowns(minute_dropdown, second_dropdown)
     for i = 0, 59 do
         local value = (i < 10) and ("0" .. i) or tostring(i)
