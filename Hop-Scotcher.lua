@@ -1,54 +1,84 @@
 --[[ 
-    Hop Scotcher - A VLC extension for hopping over custom video sections (intro/outro).
+    Hop Scotcher - A VLC extension for skipping custom video sections.
     Author: Douglas Green
-    Version: 2.0.0
+    Version: 2.1.0
 
-    This script provides a user interface for setting hop-in and hop-out times in minutes and seconds.
-    Users can save, load, and delete hop maps (profiles) for faster setups.
+    FEATURES:
+    - Define hop-in and hop-out times using keyboard shortcuts.
+    - Save times as profiles for reuse.
+    - Provide visual feedback via the VLC UI and logs.
 
-    PLEASE NOTE: THIS FILE IS JUST A CONSOLIDATION OF ALL THE OTHER FILES INSIDE THE SRC DIRECTORY. i HAVE DONE THIS AS I WAS UNABLE TO GET VLC TO RECOGNIZE HOP SCOTCHER WHILE IN A SUBDIRECTORY. THIS IS A QUICK FIX AND IN THE FUTURE I MAY RETURN TO THE MODULAR SETUP AS I FEEL IT IS WAY MORE MANAGEABLE AND ELEGANT. ENJOY!
-
-]] --[[ ========= IMPORTS AND GLOBAL VARIABLES ========= ]] local vlc = vlc
-local profiles = {} -- Table to store Hop Maps (profiles)
-local config_file = vlc.config.configdir() .. "/hop-scotcher.conf" -- Configuration file path
-local playlist_items = {} -- List of playlist items with per-file settings
-local dialog_instance = nil -- Dialog instance
+    NOTE:
+    - Place this script in VLC's `lua/extensions` directory.
+    - Activate via `View > Hop Scotcher` in VLC.
+]] --[[ ========= IMPORTS AND GLOBAL VARIABLES ========= ]] local vlc = vlc -- Access VLC's Lua API.
+local profiles = {} -- Stores saved hop maps (profiles).
+local config_file = vlc.config.configdir() .. "/Hop-Scotcher.conf" -- Config file path.
+local hop_in_time = nil -- Stores dynamically set hop-in time.
+local hop_out_time = nil -- Stores dynamically set hop-out time.
+local dialog_instance = nil -- Reference to the dialog instance.
+local message_area = nil -- Reference to the text area for messages.
 
 --[[ ========= UTILITY FUNCTIONS ========= ]]
--- Convert time string (m:s) to total seconds
-local function time_to_seconds(time_str)
-    local minutes, seconds = time_str:match("(%d+):(%d+)")
-    return tonumber(minutes) * 60 + tonumber(seconds)
-end
 
--- Convert seconds to time string (m:s)
+-- Converts total seconds to a formatted time string (m:ss).
+-- Example: 90 seconds becomes "1:30".
 local function seconds_to_time(total_seconds)
+    if not total_seconds then return "N/A" end -- Handle unset times.
     local minutes = math.floor(total_seconds / 60)
     local seconds = total_seconds % 60
     return string.format("%d:%02d", minutes, seconds)
 end
 
--- Read profiles from the configuration file
+-- Displays a message in the dialog or logs it if the dialog is unavailable.
+-- This is the primary method for providing feedback to the user.
+local function display_message(msg)
+    if message_area then
+        message_area:set_text(msg)
+    else
+        vlc.msg.info(msg) -- Fallback for when the dialog is not available.
+    end
+end
+
+-- Saves the current hop-in and hop-out times as a profile.
+-- Automatically generates a unique name for the profile.
+local function save_dynamic_profile()
+    if not hop_in_time or not hop_out_time then
+        display_message("Both hop-in and hop-out times must be set!")
+        return
+    end
+    local profile_name = "Quick Hop " .. os.date("%H:%M:%S") -- Unique name.
+    table.insert(profiles, {
+        name = profile_name,
+        hop_in_time = hop_in_time,
+        hop_out_time = hop_out_time
+    })
+    write_profiles() -- Persist the profiles to the configuration file.
+    display_message("Profile '" .. profile_name .. "' saved successfully!")
+end
+
+-- Reads saved profiles from the configuration file.
+-- Returns a table of profiles or an empty table if the file doesn't exist.
 local function read_profiles()
     local file = io.open(config_file, "r")
     if not file then return {} end
-
-    local lines = {}
+    local profiles = {}
     for line in file:lines() do
-        local name, hop_in_time, hop_out_time = line:match("(.+)=(%d+),(%d+)")
-        if name and hop_in_time and hop_out_time then
-            table.insert(lines, {
+        local name, hop_in, hop_out = line:match("(.+)=(%d+),(%d+)")
+        if name and hop_in and hop_out then
+            table.insert(profiles, {
                 name = name,
-                hop_in_time = tonumber(hop_in_time),
-                hop_out_time = tonumber(hop_out_time)
+                hop_in_time = tonumber(hop_in),
+                hop_out_time = tonumber(hop_out)
             })
         end
     end
     file:close()
-    return lines
+    return profiles
 end
 
--- Write profiles to the configuration file
+-- Writes all profiles to the configuration file.
+-- Each profile is saved in the format: `name=hop_in_time,hop_out_time`.
 local function write_profiles()
     local file = io.open(config_file, "w")
     for _, profile in ipairs(profiles) do
@@ -58,175 +88,83 @@ local function write_profiles()
     file:close()
 end
 
--- Export the playlist to an .xspf file
-local function export_playlist(file_path)
-    local file = io.open(file_path, "w")
-    if not file then
-        vlc.msg.err("Failed to open file for writing: " .. file_path)
+--[[ ========= DIALOG FUNCTIONS ========= ]]
+
+-- Opens the main dialog window for the extension.
+local function open_dialog()
+    local dlg = vlc.dialog("Hop Scotcher") -- Create the dialog instance.
+    dialog_instance = dlg
+
+    -- Messages Section
+    dlg:add_label("<center><h2>Messages</h2></center>", 1, 1, 4, 1)
+    message_area = dlg:add_text_input("", 1, 2, 4, 1)
+    message_area:set_text("Welcome to Hop Scotcher!")
+
+    -- Save Profile Section
+    dlg:add_label("<center><h2>Dynamic Time Recording</h2></center>", 1, 3, 4, 1)
+    dlg:add_button("Save Dynamic Profile", save_dynamic_profile, 1, 4, 4, 1)
+end
+
+-- Closes the dialog window.
+local function close_dialog()
+    if dialog_instance then
+        dialog_instance:delete()
+        dialog_instance = nil
+    end
+end
+
+--[[ ========= KEYBOARD SHORTCUT HANDLER ========= ]]
+
+-- Handles keyboard shortcuts to dynamically set hop-in and hop-out times.
+-- The first press sets hop-in time; the second press sets hop-out time.
+local function handle_keyboard_shortcut()
+    local input = vlc.object.input() -- Get the current input object.
+    if not input then
+        display_message("No media is currently playing.")
         return
     end
 
-    -- Write XSPF format header
-    file:write('<?xml version="1.0" encoding="UTF-8"?>\n')
-    file:write('<playlist version="1" xmlns="http://xspf.org/ns/0/">\n')
-    file:write('<trackList>\n')
-
-    -- Write each track
-    for _, item in ipairs(playlist_items) do
-        file:write('<track>\n')
-        file:write('<location>', item.path, '</location>\n')
-        file:write('<title>', item.name, '</title>\n')
-        file:write(
-            '<extension application="http://www.videolan.org/vlc/playlist/0">\n')
-        file:write('<vlc:option>start-time=', item.hop_in_time,
-                   '</vlc:option>\n')
-        file:write('<vlc:option>stop-time=', item.hop_out_time,
-                   '</vlc:option>\n')
-        file:write('</extension>\n')
-        file:write('</track>\n')
+    local current_time = vlc.var.get(input, "time") -- Get the current playback time.
+    if not hop_in_time then
+        hop_in_time = current_time
+        display_message("Hop-In Time Set: " .. seconds_to_time(hop_in_time))
+    elseif not hop_out_time then
+        hop_out_time = current_time
+        display_message("Hop-Out Time Set: " .. seconds_to_time(hop_out_time))
+    else
+        display_message("Both times are already set. Save the profile or reset.")
     end
-
-    -- Close the playlist
-    file:write('</tracklist>\n')
-    file:write('</playlist>\n')
-    file:close()
-    vlc.msg.info("Playlist exported to: " .. file_path)
-end
-
---[[ ========= DIALOG FUNCTIONS ========= ]]
-local function update_playlist_list(dialog)
-    local playlist_list = dialog:get_widget("playlist_list")
-    playlist_list:clear()
-
-    for _, item in ipairs(playlist_items) do
-        playlist_list:add_value(item.name, item)
-    end
-end
-
-local function populate_time_dropdowns(minute_dropdown, second_dropdown)
-    for i = 0, 59 do
-        local value = (i < 10) and ("0" .. i) or tostring(i)
-        minute_dropdown:add_value(value, i)
-        second_dropdown:add_value(value, i)
-    end
-end
-
-local function open_dialog()
-    -- Create the dialog
-    local dlg = vlc.dialog("Hop Scotcher")
-    dialog_instance = dlg
-
-    -- Section: Hop Paths
-    dlg:add_label("<center><h2>Hop Paths</h2></center>", 1, 1, 4, 1)
-    local preset_dropdown = dlg:add_dropdown(1, 2, 2, 1)
-    dlg:add_button("Load Hop Path", function()
-        local idx = preset_dropdown:get_value()
-        if not idx then return end
-        local profile = profiles[idx]
-        dlg:get_widget("hop_map_name"):set_text(profile.name)
-        dlg:get_widget("hop_in_minutes"):set_value(math.floor(
-                                                       profile.hop_in_time / 60))
-        dlg:get_widget("hop_in_seconds"):set_value(profile.hop_in_time % 60)
-        dlg:get_widget("hop_out_minutes"):set_value(math.floor(
-                                                        profile.hop_out_time /
-                                                            60))
-        dlg:get_widget("hop_out_seconds"):set_value(profile.hop_out_time % 60)
-    end, 3, 2, 1, 1)
-    dlg:add_button("Delete Hop Path", function()
-        local idx = preset_dropdown:get_value()
-        if not idx then return end
-        table.remove(profiles, idx)
-        write_profiles()
-    end, 4, 2, 1, 1)
-
-    -- Section: Settings
-    dlg:add_label("<center><h2>Settings</h2></center>", 1, 3, 4, 1)
-    dlg:add_label("Hop Map Name:", 1, 4, 1, 1)
-    dlg:add_text_input("", 2, 4, 3, 1, "hop_map_name")
-
-    dlg:add_label("Hop-In Time (m:s):", 1, 5, 1, 1)
-    local hop_in_minutes = dlg:add_dropdown(2, 5, 1, 1, "hop_in_minutes")
-    local hop_in_seconds = dlg:add_dropdown(3, 5, 1, 1, "hop_in_seconds")
-    populate_time_dropdowns(hop_in_minutes, hop_in_seconds)
-
-    dlg:add_label("Hop-Out Time (m:s):", 1, 6, 1, 1)
-    local hop_out_minutes = dlg:add_dropdown(2, 6, 1, 1, "hop_out_minutes")
-    local hop_out_seconds = dlg:add_dropdown(3, 6, 1, 1, "hop_out_seconds")
-    populate_time_dropdowns(hop_out_minutes, hop_out_seconds)
-
-    dlg:add_button("Save Hop Map", function()
-        local name = dlg:get_widget("hop_map_name"):get_text()
-        if name == "" then return end
-        local hop_in_time = hop_in_minutes:get_value() * 60 +
-                                hop_in_seconds:get_value()
-        local hop_out_time = hop_out_minutes:get_value() * 60 +
-                                 hop_out_seconds:get_value()
-
-        -- Update existing or add new profile
-        for _, profile in ipairs(profiles) do
-            if profile.name == name then
-                profile.hop_in_time = hop_in_time
-                profile.hop_out_time = hop_out_time
-                write_profiles()
-                return
-            end
-        end
-        table.insert(profiles, {
-            name = name,
-            hop_in_time = hop_in_time,
-            hop_out_time = hop_out_time
-        })
-        write_profiles()
-    end, 1, 7, 4, 1)
-
-    -- Section: Playlist
-    dlg:add_label("<center><h2>Playlist</h2></center>", 1, 8, 4, 1)
-    dlg:add_button("Start Hopping", function()
-        local items = vlc.playlist.get("playlist", false).children
-        vlc.playlist.clear()
-
-        local hop_in_time = hop_in_minutes:get_value() * 60 +
-                                hop_in_seconds:get_value()
-        local hop_out_time = hop_out_minutes:get_value() * 60 +
-                                 hop_out_seconds:get_value()
-
-        for _, item in ipairs(items) do
-            local options = {}
-            if hop_in_time > 0 then
-                table.insert(options, "start-time=" .. hop_in_time)
-            end
-            if item.duration > hop_out_time then
-                table.insert(options,
-                             "stop-time=" .. (item.duration - hop_out_time))
-            end
-            vlc.playlist.enqueue({{path = item.path, options = options}})
-        end
-        vlc.playlist.play()
-    end, 1, 9, 2, 1)
-    dlg:add_button("Stop Hopping", function() vlc.playlist.stop() end, 3, 9, 2,
-                   1)
-end
-
-local function close_dialog()
-    if dialog_instance then dialog_instance:delete() end
 end
 
 --[[ ========= VLC EXTENSION FUNCTIONS ========= ]]
+
+-- Descriptor provides metadata about the extension.
 function descriptor()
     return {
         title = "Hop Scotcher",
-        version = "2.0.0",
+        version = "2.3.0",
         author = "Douglas Green",
         description = "Hop over intro and outro sections in VLC playlists.",
-        capabilities = {}
+        capabilities = {"input-listener"} -- Enable keyboard input handling.
     }
 end
 
+-- Activates the extension, initializes the dialog, and sets up event listeners.
 function activate()
-    profiles = read_profiles()
-    open_dialog()
+    profiles = read_profiles() -- Load saved profiles from the configuration file.
+    vlc.var.add_callback(vlc.object.input(), "key-pressed",
+                         handle_keyboard_shortcut) -- Listen for key presses.
+    display_message("Hop Scotcher Activated! Use the shortcut to record times.")
+    open_dialog() -- Open the main dialog window.
 end
 
-function deactivate() close_dialog() end
+-- Deactivates the extension, removes event listeners, and closes the dialog.
+function deactivate()
+    vlc.var.del_callback(vlc.object.input(), "key-pressed",
+                         handle_keyboard_shortcut) -- Stop listening for key presses.
+    display_message("Hop Scotcher Deactivated. Goodbye!")
+    close_dialog() -- Close the main dialog window.
+end
 
+-- Ensures the extension stops running properly.
 function close() vlc.deactivate() end
